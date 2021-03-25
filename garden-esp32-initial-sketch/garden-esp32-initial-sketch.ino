@@ -6,6 +6,7 @@
 #include "Adafruit_seesaw.h"
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <ezTime.h>
 
 // The MQTT topics that this device should publish/subscribe
 #define AWS_IOT_PUBLISH_TOPIC   "garden/pub"
@@ -22,26 +23,41 @@ DeviceAddress sensor1 = { 0x28, 0xFE, 0xB, 0x79, 0x97, 0x4, 0x3, 0xBF };
 
 // Variables
 unsigned long previousMillis = 0;
+Timezone Eastern;
 
 // Constants
-const long interval = 20000; //milliseconds (20 seconds)
+const long interval = 300000; //milliseconds (5 minutes)
+//const long interval = 20000; //milliseconds (20 seconds)
 
 WiFiClientSecure net = WiFiClientSecure();
 MQTTClient client = MQTTClient(256);
 Adafruit_seesaw ss;
 
-void connectAWS()
+void connectWiFi()
 {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   Serial.println("Connecting to Wi-Fi");
 
-  while (WiFi.status() != WL_CONNECTED){
-    delay(500);
-    Serial.print(".");
+  int watchdog = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    if (watchdog < 20) {
+      delay(500);
+      Serial.print(".");
+      watchdog++;
+    }
+    else {
+      Serial.println("WIFI: still not connected, triggering reboot ...");
+      ESP.restart();
+    }
   }
 
+  Serial.println("WIFI Connected!");
+}
+
+void connectAWS()
+{
   // Configure WiFiClientSecure to use the AWS IoT device credentials
   net.setCACert(AWS_CERT_CA);
   net.setCertificate(AWS_CERT_CRT);
@@ -77,16 +93,15 @@ void getBatteryVoltage()
   //Battery Voltage
   float a13_reading = analogRead(A13);
   float batt_volt = (a13_reading/4095)*2*3.3*1.1;
-  String batt_volt_data = "{ \"Voltage\":\"" + String(batt_volt, 3) + "\" }";
+  //String batt_volt_data = "{ \"Voltage\":\"" + String(batt_volt, 3) + "\" }";
   
-  Serial.println(batt_volt);
+  Serial.print("BatterySensor1-Voltage: "); Serial.println(batt_volt);
 
   //StaticJsonDocument<200> doc;
   DynamicJsonDocument doc(1024);
-  doc["Device"] = "garden-esp32-1";
-  doc["Time"] = millis();
-  doc["Sensor"] = "BatterySensor1";
-  doc["Data"][0] = batt_volt_data;
+  doc["sensor"] = "garden-esp32-1-BatterySensor1-Voltage";
+  doc["time"] = Eastern.dateTime(ISO8601);
+  doc["data"] = batt_volt;
   
   char jsonBuffer[512];
   serializeJson(doc, jsonBuffer); 
@@ -97,43 +112,65 @@ void getBatteryVoltage()
 
 void getSoilMeasurements()
 {
-  float tempC = ss.getTemp();
-  uint16_t capread = ss.touchRead(0);
-  String soil_temp_capacitance = "{ \"Temperature\":\"" + String(tempC, 3) + "\", \"Capacitance\":\"" + String(capread, 3) + "\" }";
+  float soil_temperature_c = ss.getTemp();
+  float soil_temperature_f = (soil_temperature_c*1.8)+32;
+  uint16_t soil_capacitence = ss.touchRead(0);
+  //String soil_temp_capacitance = "{ \"Temperature\":\"" + String(tempC, 3) + "\", \"Capacitance\":\"" + String(capread, 3) + "\" }";
 
-  Serial.print("Temperature: "); Serial.print(tempC); Serial.println("*C");
-  Serial.print("Capacitive: "); Serial.println(capread);
+  Serial.print("SoilSensor1-Temperature: "); Serial.print(soil_temperature_f); Serial.println("*F");
+  Serial.print("SoilSensor1-Capacitive: "); Serial.println(soil_capacitence);
 
+  //Soil Capacitence
   DynamicJsonDocument doc(1024);
-  doc["Device"] = "garden-esp32-1";
-  doc["Time"] = millis();
-  doc["Sensor"] = "SoilSensor1";
-  doc["Data"][0] = soil_temp_capacitance;
+  doc["sensor"] = "garden-esp32-1-SoilSensor1-Capacitence";
+  doc["time"] = Eastern.dateTime(ISO8601);
+  doc["data"] = soil_capacitence;
   
   char jsonBuffer[512];
   serializeJson(doc, jsonBuffer); 
+
+  //Soil Temperature
+  DynamicJsonDocument doc2(1024);
+  doc2["sensor"] = "garden-esp32-1-SoilSensor1-Temperature";
+  doc2["time"] = Eastern.dateTime(ISO8601);
+  doc2["data"] = soil_temperature_f;
+  
+  char jsonBuffer2[512];
+  serializeJson(doc2, jsonBuffer2);
   
   // Publish Soil Measurements
-  publishMessage(jsonBuffer);
+  publishMessage(jsonBuffer);   //Soil Capacitence
+  publishMessage(jsonBuffer2);  //Soil Temperature
 }
 
 void getTemperatureReadings()
 {
-  Serial.print("Requesting temperatures...");
+  //Serial.print("Requesting temperatures...");
   sensors.requestTemperatures(); // Send the command to get temperatures
-  Serial.println("DONE");
+  //Serial.println("DONE");
   
-  Serial.print("Sensor 1(*C): ");
-  Serial.print(sensors.getTempC(sensor1)); 
-  Serial.print(" Sensor 1(*F): ");
-  Serial.println(sensors.getTempF(sensor1)); 
+  float temp_reading = sensors.getTempF(sensor1);
+
+  Serial.print("TempSensor1-Temperature: "); Serial.print(temp_reading); Serial.println("*F");
+
+  DynamicJsonDocument doc(1024);
+  doc["sensor"] = "garden-esp32-1-TempSensor1-Temperature";
+  doc["time"] = Eastern.dateTime(ISO8601);
+  doc["data"] = temp_reading;
+  
+  char jsonBuffer[512];
+  serializeJson(doc, jsonBuffer);
+    
+  // Publish Temperature Reading
+  publishMessage(jsonBuffer);
 }
 
 void publishMessage(char* jsonBuffer)
-{
+{ 
 
   client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer);
 }
+
 
 void messageHandler(String &topic, String &payload) {
   Serial.println("incoming: " + topic + " - " + payload);
@@ -145,7 +182,11 @@ void messageHandler(String &topic, String &payload) {
 
 void setup() {
   Serial.begin(9600);
+  connectWiFi();
   connectAWS();
+
+  // Sync time with NTP server
+  waitForSync();
   
 //  Serial.println("seesaw Soil Sensor example!");
 //  
@@ -168,6 +209,10 @@ void loop() {
   if (currentMillis - previousMillis >= interval) {
     // Save currentMillis as previousMillis
     previousMillis = currentMillis;
+
+    //Get time
+    Eastern.setLocation("America/New_York");
+    Serial.println("Data/Time:" + Eastern.dateTime(ISO8601));
 
     //Check Sensors
     getBatteryVoltage();
